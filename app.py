@@ -3,18 +3,20 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from ml_pipeline import (
-    load_data, preprocess_data, feature_selection,
-    train_model, evaluate_model, save_model, load_model, predict_bulk, predict_single
+    load_data, preprocess_data, load_model,
+    predict_bulk, predict_single, evaluate_model
 )
-import os
 import base64
+
 
 # Loading CSS
 def local_css(file_name):
     with open(file_name) as f:
         st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+
 local_css("style.css")
+
 
 def plot_feature_importance(model, features):
     importance = model.feature_importances_
@@ -27,77 +29,116 @@ def plot_feature_importance(model, features):
     fig.update_layout(height=600)
     st.plotly_chart(fig, use_container_width=True)
 
+
 def plot_churn_distribution(df):
-    fig = px.pie(df, names='Churn', title='Churn Distribution',
-                 color='Churn', color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'})
+    # Handle both raw data (Yes/No) and encoded data (0/1)
+    if 'Churn' not in df.columns:
+        st.error("Churn column not found in data")
+        return
+
+    if df['Churn'].dtype == 'object':
+        churn_data = df['Churn']
+    else:
+        churn_data = df['Churn'].map({0: 'No', 1: 'Yes'})
+
+    churn_counts = churn_data.value_counts().reset_index()
+    churn_counts.columns = ['Churn', 'Count']
+
+    fig = px.pie(churn_counts,
+                 names='Churn',
+                 values='Count',
+                 title='Churn Distribution',
+                 color='Churn',
+                 color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'})
     st.plotly_chart(fig, use_container_width=True)
+
 
 def plot_numerical_distribution(df, column):
-    fig = px.histogram(df, x=column, color='Churn',
+    # Handle both raw and encoded churn data
+    if df['Churn'].dtype == 'object':
+        churn_col = df['Churn']
+    else:
+        churn_col = df['Churn'].map({0: 'No', 1: 'Yes'})
+
+    fig = px.histogram(df, x=column, color=churn_col,
                        marginal='box', barmode='overlay',
-                       color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'})
+                       color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'},
+                       title=f'{column} Distribution by Churn Status')
     st.plotly_chart(fig, use_container_width=True)
 
+
 def plot_categorical_distribution(df, column):
-    fig = px.histogram(df, x=column, color='Churn', barmode='group',
-                       color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'})
+    # Handle both raw and encoded churn data
+    if df['Churn'].dtype == 'object':
+        churn_col = df['Churn']
+    else:
+        churn_col = df['Churn'].map({0: 'No', 1: 'Yes'})
+
+    fig = px.histogram(df, x=column, color=churn_col, barmode='group',
+                       color_discrete_map={'No': '#4CAF50', 'Yes': '#F44336'},
+                       title=f'{column} Distribution by Churn Status')
     st.plotly_chart(fig, use_container_width=True)
+
 
 def get_table_download_link(df):
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
     return f'<a href="data:file/csv;base64,{b64}" download="churn_predictions.csv">Download Predictions as CSV</a>'
 
+
 def main():
     st.subheader("📊 Telco Customer Churn Prediction")
     st.markdown("Predict which customers are likely to churn and visualize key insights")
 
-    menu = ["Train Model", "Single Prediction", "Bulk Prediction", "Data Exploration"]
+    # Load the model and data
+    @st.cache_resource
+    def load_app_data():
+        try:
+            saved = load_model("churn_model.pkl")
+            raw_data = load_data()
+            df_encoded = preprocess_data(raw_data.copy())
+            return saved['model'], saved['features'], raw_data, df_encoded
+        except Exception as e:
+            st.error(f"Error loading model or data: {str(e)}")
+            return None, None, None, None
+
+    model, selected_features, raw_data, df_encoded = load_app_data()
+
+    if model is None:
+        st.error("Failed to load model. Please ensure 'churn_model.pkl' exists.")
+        return
+
+    # Evaluate model performance
+    X = df_encoded.drop('Churn', axis=1)[selected_features]
+    y = df_encoded['Churn']
+    metrics = evaluate_model(model, X, y)
+
+    menu = ["Model Performance", "Single Prediction", "Bulk Prediction", "Data Exploration"]
     choice = st.sidebar.selectbox("Navigation", menu)
 
-    if choice == "Train Model":
-        st.subheader("Train the Churn Prediction Model")
-        st.info("This will train a new XGBoost model on the Telco customer data")
+    if choice == "Model Performance":
+        st.subheader("Model Performance Metrics")
 
-        df = load_data()
-        df_encoded = preprocess_data(df)
-        X = df_encoded.drop('Churn', axis=1)
-        y = df_encoded['Churn']
-        X_selected, selected_features = feature_selection(X, y)
+        st.write("## Evaluation Metrics")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Accuracy", f"{metrics['accuracy']:.2%}")
+        col2.metric("Precision", f"{metrics['precision']:.2%}")
+        col3.metric("Recall", f"{metrics['recall']:.2%}")
 
-        from sklearn.model_selection import train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(X_selected, y, test_size=0.2, random_state=42)
+        st.write("### Confusion Matrix")
+        fig = px.imshow(metrics['conf_matrix'],
+                        labels=dict(x="Predicted", y="Actual", color="Count"),
+                        x=['No Churn', 'Churn'],
+                        y=['No Churn', 'Churn'],
+                        text_auto=True,
+                        color_continuous_scale='Blues')
+        st.plotly_chart(fig, use_container_width=True)
 
-        if st.button('Train Model'):
-            with st.spinner('Training model... This may take a few minutes'):
-                model = train_model(X_train, y_train)
-                metrics = evaluate_model(model, X_test, y_test)
-                save_model(model, selected_features, 'churn_model.pkl')
-                st.success('Model trained and saved successfully!')
-
-                st.write("## Model Evaluation Metrics")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Accuracy", f"{metrics['accuracy']:.2%}")
-                col2.metric("Precision", f"{metrics['precision']:.2%}")
-                col3.metric("Recall", f"{metrics['recall']:.2%}")
-
-                st.write("### Confusion Matrix")
-                fig = px.imshow(metrics['conf_matrix'],
-                                labels=dict(x="Predicted", y="Actual", color="Count"),
-                                x=['No Churn', 'Churn'],
-                                y=['No Churn', 'Churn'],
-                                text_auto=True,
-                                color_continuous_scale='Blues')
-                st.plotly_chart(fig, use_container_width=True)
-
-                st.write("### Feature Importance")
-                plot_feature_importance(model, selected_features)
+        st.write("### Feature Importance")
+        plot_feature_importance(model, selected_features)
 
     elif choice == "Single Prediction":
         st.subheader("Predict Churn for a Single Customer")
-        saved = load_model("churn_model.pkl")
-        model = saved['model']
-        selected_features = saved['features']
 
         with st.expander("Enter Customer Details", expanded=True):
             col1, col2 = st.columns(2)
@@ -142,7 +183,6 @@ def main():
         if st.button("Predict Churn"):
             prediction, prob = predict_single(model, input_df)
             churn_status = "High" if prediction[0] == 1 else "Low"
-            color = "red" if prediction[0] == 1 else "green"
             emoji = "🔴" if prediction[0] == 1 else "🟢"
 
             st.markdown(f"""
@@ -170,27 +210,19 @@ def main():
 
     elif choice == "Bulk Prediction":
         st.subheader("Predict Churn for Multiple Customers")
-        saved = load_model("churn_model.pkl")
-        model = saved['model']
-        selected_features = saved['features']
 
         st.info("Upload a CSV file with customer data. Ensure it has the same structure as the training data.")
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
         if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
+            df_upload = pd.read_csv(uploaded_file)
             st.write("Preview of uploaded data:")
-            st.write(df.head())
+            st.write(df_upload.head())
 
             if st.button("Predict for All Customers"):
                 with st.spinner('Processing predictions...'):
-                    df_processed = preprocess_data(df)
-                    missing_features = set(selected_features) - set(df_processed.columns)
-                    for feature in missing_features:
-                        df_processed[feature] = 0
-
                     predictions, probabilities = predict_bulk(model, uploaded_file, selected_features)
-                    result_df = df.copy()
+                    result_df = df_upload.copy()
                     result_df['Churn Prediction'] = ['Yes' if p == 1 else 'No' for p in predictions]
                     result_df['Churn Probability'] = probabilities
 
@@ -198,37 +230,36 @@ def main():
                     st.write("### Prediction Results")
                     st.write(result_df)
                     st.metric("Predicted Churn Rate",
-                             f"{result_df['Churn Prediction'].value_counts(normalize=True).get('Yes', 0):.1%}")
+                              f"{result_df['Churn Prediction'].value_counts(normalize=True).get('Yes', 0):.1%}")
                     st.markdown(get_table_download_link(result_df), unsafe_allow_html=True)
                     st.write("### Churn Distribution in Predictions")
                     plot_churn_distribution(result_df.rename(columns={'Churn Prediction': 'Churn'}))
 
     elif choice == "Data Exploration":
         st.subheader("Data Exploration and Insights")
-        df = load_data()
-        df_encoded = preprocess_data(df)
 
         st.write("### Dataset Overview")
-        st.write(f"Total customers: {len(df)}")
-        st.write(df.head())
+        st.write(f"Total customers: {len(raw_data)}")
+        st.write(raw_data.head())
 
         st.write("### Churn Distribution")
-        plot_churn_distribution(df)
+        plot_churn_distribution(raw_data)
 
         st.write("### Numerical Features Analysis")
-        num_feature = st.selectbox("Select numerical feature", ['MonthlyCharges', 'tenure'])
-        plot_numerical_distribution(df, num_feature)
+        num_feature = st.selectbox("Select numerical feature", ['MonthlyCharges', 'tenure', 'TotalCharges'])
+        plot_numerical_distribution(raw_data, num_feature)
 
         st.write("### Categorical Features Analysis")
         cat_feature = st.selectbox("Select categorical feature",
-                                 ['Contract', 'PaymentMethod', 'InternetService', 'gender'])
-        plot_categorical_distribution(df, cat_feature)
+                                   ['Contract', 'PaymentMethod', 'InternetService', 'gender', 'Partner'])
+        plot_categorical_distribution(raw_data, cat_feature)
 
         st.write("### Correlation Analysis")
         numeric_df = df_encoded.select_dtypes(include=['int64', 'float64'])
         fig = px.imshow(numeric_df.corr(), color_continuous_scale='RdBu_r',
                         zmin=-1, zmax=1, title="Feature Correlation Matrix")
         st.plotly_chart(fig, use_container_width=True)
+
 
 if __name__ == '__main__':
     main()
