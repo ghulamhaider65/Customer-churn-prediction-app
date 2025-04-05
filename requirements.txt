@@ -1,0 +1,8 @@
+pandas==1.5.3
+numpy==1.24.2
+scikit-learn==1.2.2
+xgboost==1.7.6
+imblearn==0.0
+joblib==1.2.0
+streamlit==1.16.0
+plotly==5.10.0
